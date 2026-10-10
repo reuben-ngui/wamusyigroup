@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Administrator · Merry-Go-Round</title>
+<link rel="stylesheet" href="/style.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="/config.js"></script>
+</head>
+<body>
+<div id="toast" class="toast hide" role="status"></div>
+
+<!-- LOGIN -->
+<section id="loginView" class="login hide">
+  <div class="card">
+    <div class="center"><div class="crest" style="color:var(--gold)">★</div><h2>Administrator login</h2></div>
+    <label for="email">Email</label><input id="email" type="email" autocomplete="username">
+    <label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password">
+    <button class="cta" id="loginBtn">Log in</button>
+    <p class="err" id="loginErr" role="alert"></p>
+    <p><button class="btn sm" id="forgot">Forgot password?</button> <a href="/" class="sub">Back to member page</a></p>
+  </div>
+</section>
+
+<!-- SET NEW PASSWORD (after the reset email link) -->
+<section id="recoverView" class="login hide">
+  <div class="card">
+    <h2>Set a new password</h2>
+    <label for="rpw">New password (8+ characters)</label><input id="rpw" type="password" autocomplete="new-password">
+    <button class="cta" id="rpwBtn">Save password</button>
+    <p class="err" id="rpwErr" role="alert"></p>
+  </div>
+</section>
+
+<!-- DASHBOARD -->
+<div id="appView" class="app hide">
+  <aside class="side"><h3>★ Merry-Go-Round</h3><nav id="nav"></nav></aside>
+  <main class="main" id="main"></main>
+</div>
+
+<dialog id="dlg">
+  <form method="dialog">
+    <p id="dlgMsg"></p>
+    <input id="dlgPw" type="password" placeholder="Admin password" required autocomplete="current-password">
+    <p style="text-align:right">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn bad" value="ok">Confirm</button>
+    </p>
+  </form>
+</dialog>
+
+<script>
+const sb = supabase.createClient(CONFIG.url, CONFIG.key);
+const $ = id => document.getElementById(id);
+const root = location.origin + "/";
+const fmt = t => t ? new Date(t).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "—";
+let D = null, tab = "overview", chan = null, search = "", sortBy = "number", newInvite = null, recovering = false;
+
+/* ---------- small helpers ---------- */
+function h(tag, a, ...kids){
+  const e = document.createElement(tag);
+  if(typeof a === "string" || typeof a === "number") e.textContent = a;
+  else if(a) for(const [k, v] of Object.entries(a)){
+    if(k === "class") e.className = v; else if(k.startsWith("on")) e[k] = v;
+    else if(v === true) e.setAttribute(k, ""); else if(v !== false && v != null) e.setAttribute(k, v);
+  }
+  kids.flat().forEach(c => { if(c != null && c !== false) e.append(c.nodeType ? c : document.createTextNode(c)); });
+  return e;
+}
+let tt; function toast(m, bad){ const t = $("toast"); t.textContent = m; t.className = "toast" + (bad ? " bad" : ""); clearTimeout(tt); tt = setTimeout(() => t.classList.add("hide"), 4500); }
+async function call(fn, args){ const { data, error } = await sb.rpc(fn, args); if(error){ toast("Error: " + error.message, true); return null; } return data; }
+async function copy(t, m){ try{ await navigator.clipboard.writeText(t); toast(m); }catch{ prompt("Copy this:", t); } }
+function askPw(msg){
+  return new Promise(res => {
+    const d = $("dlg"); $("dlgMsg").textContent = msg; $("dlgPw").value = ""; d.returnValue = ""; d.showModal();
+    d.onclose = () => res(d.returnValue === "ok" ? $("dlgPw").value : null);
+  });
+}
+async function reauth(msg){
+  const pw = await askPw(msg); if(!pw) return false;
+  const { error } = await sb.auth.signInWithPassword({ email: D.admin_email, password: pw });
+  if(error){ toast("Wrong password. Action cancelled.", true); return false; }
+  return true;
+}
+
+/* ---------- authentication ---------- */
+function show(v){ ["loginView", "recoverView", "appView"].forEach(x => $(x).classList.toggle("hide", x !== v)); }
+
+async function enter(){
+  const { data: s } = await sb.auth.getSession();
+  if(recovering){ show("recoverView"); return; }
+  if(!s.session){ show("loginView"); return; }
+  const { data: ok } = await sb.rpc("is_admin");
+  if(!ok){ await sb.auth.signOut(); show("loginView"); $("loginErr").textContent = "This account is not the administrator."; return; }
+  show("appView");
+  await load(true);
+  if(!chan){
+    chan = sb.channel("admin-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "assignments" }, () => load())
+      .on("postgres_changes", { event: "*", schema: "public", table: "public_status" }, () => load())
+      .subscribe();
+    setInterval(() => load(), 10000);
+  }
+}
+sb.auth.onAuthStateChange(ev => { if(ev === "PASSWORD_RECOVERY") recovering = true; });
+
+$("loginBtn").onclick = async () => {
+  $("loginErr").textContent = "";
+  const { error } = await sb.auth.signInWithPassword({ email: $("email").value.trim(), password: $("pw").value });
+  if(error){ $("loginErr").textContent = "Wrong email or password."; return; }
+  $("pw").value = "";
+  const { data: ok } = await sb.rpc("is_admin");
+  if(ok) await sb.rpc("admin_log", { p_event: "login" });
+  enter();
+};
+$("pw").addEventListener("keydown", e => e.key === "Enter" && $("loginBtn").click());
+$("forgot").onclick = async () => {
+  const email = $("email").value.trim();
+  if(!email){ $("loginErr").textContent = "Type your admin email above first."; return; }
+  await sb.auth.resetPasswordForEmail(email, { redirectTo: root + "admin/" });
+  $("loginErr").textContent = ""; toast("If that is the administrator email, a reset link has been sent.");
+};
+$("rpwBtn").onclick = async () => {
+  if($("rpw").value.length < 8){ $("rpwErr").textContent = "Use at least 8 characters."; return; }
+  const { error } = await sb.auth.updateUser({ password: $("rpw").value });
+  if(error){ $("rpwErr").textContent = error.message; return; }
+  recovering = false; $("rpw").value = ""; history.replaceState(null, "", location.pathname); enter();
+};
+async function logout(){ await sb.rpc("admin_log", { p_event: "logout" }); await sb.auth.signOut(); location.href = "/admin/login"; }
+
+/* ---------- data ---------- */
+async function load(force){
+  const ae = document.activeElement;
+  if(!force && ae && ["INPUT", "SELECT", "TEXTAREA"].includes(ae.tagName) && $("main").contains(ae)) return;
+  const { data, error } = await sb.rpc("admin_overview");
+  if(error){ if(/not authorized/i.test(error.message)){ await sb.auth.signOut(); location.reload(); } return; }
+  D = data; render();
+}
+
+/* ---------- views ---------- */
+const TABS = [["overview", "Dashboard Overview"], ["members", "Registered Members"], ["availability", "Number Availability"],
+  ["round", "Round Management"], ["settings", "Registration Settings"], ["history", "Previous Rounds"],
+  ["audit", "Audit Logs"], ["account", "Admin Settings"]];
+
+function render(){
+  const n = $("nav"); n.innerHTML = "";
+  TABS.forEach(([k, l]) => n.append(h("button", { class: "nav" + (tab === k ? " on" : ""), onclick: () => { tab = k; render(); } }, l)));
+  n.append(h("button", { class: "nav", onclick: logout }, "Logout"));
+  const m = $("main"); m.innerHTML = ""; m.append(VIEWS[tab]());
+}
+const stat = (l, v) => h("div", { class: "stat" }, h("span", l), h("b", v));
+const regState = () => D.round.status === "full" ? "Full" : (D.settings.registration_open && D.round.status === "open") ? "Open" : "Closed";
+
+const VIEWS = {
+  overview(){
+    const n = D.members.length;
+    return h("div", null, h("h2", D.settings.platform_name),
+      h("div", { class: "stats" },
+        stat("Registered members", n), stat("Numbers assigned", n), stat("Numbers available", 4 - n),
+        stat("Registration status", regState()), stat("Current round", "#" + D.round.id), stat("Completion", Math.round(n / 4 * 100) + "%")),
+      h("div", { class: "bar" }, h("i", { style: "width:" + (n / 4 * 100) + "%" })),
+      h("p", { class: "sub" }, "Public link to share: " + root),
+      h("button", { class: "btn gold", onclick: () => copy(root, "Public link copied.") }, "Copy public link"));
+  },
+
+  members(){
+    const tb = h("tbody");
+    const draw = () => {
+      tb.innerHTML = "";
+      const r = D.members.filter(m => m.name.toLowerCase().includes(search.toLowerCase()));
+      r.sort((a, b) => sortBy === "number" ? a.number - b.number : new Date(a.at) - new Date(b.at));
+      r.forEach(m => tb.append(h("tr", null, h("td", "#" + m.id), h("td", m.name), h("td", { style: "font-weight:800;font-size:1.2rem" }, m.number),
+        h("td", fmt(m.at)), h("td", h("span", { class: "tag" }, "Confirmed")), h("td", m.round_id), h("td", m.invite || "—"))));
+      if(!r.length) tb.append(h("tr", null, h("td", { colspan: 7 }, "No registrations to show.")));
+    };
+    const q = h("input", { placeholder: "Search by member name" }); q.value = search; q.oninput = () => { search = q.value; draw(); };
+    const s = h("select", null, h("option", { value: "number" }, "Sort by number"), h("option", { value: "date" }, "Sort by date"));
+    s.value = sortBy; s.onchange = () => { sortBy = s.value; draw(); };
+    draw();
+    return h("div", null, h("h2", "Registered Members (round #" + D.round.id + ")"),
+      h("div", { class: "tools" }, q, s, h("button", { class: "btn", onclick: () => load(true) }, "Refresh"), h("button", { class: "btn", onclick: csv }, "Export CSV")),
+      h("div", { class: "tw" }, h("table", null,
+        h("thead", null, h("tr", null, ...["Reg. ID", "Member", "Number", "Registered", "Status", "Round", "Invitation"].map(x => h("th", x)))), tb)));
+  },
+
+  availability(){
+    const t = D.members.map(m => m.number);
+    return h("div", null, h("h2", "Number Availability"),
+      h("div", { class: "avail" }, [1, 2, 3, 4].map(n => h("div", { class: "num-card" + (t.includes(n) ? " taken" : "") }, h("b", n), h("span", t.includes(n) ? "Taken" : "Available")))),
+      h("div", { class: "tw" }, h("table", null, h("thead", null, h("tr", null, h("th", "Number"), h("th", "Status"))),
+        h("tbody", null, [1, 2, 3, 4].map(n => h("tr", null, h("td", n), h("td", h("span", { class: "tag" + (t.includes(n) ? " g" : "") }, t.includes(n) ? "Taken" : "Available"))))))),
+      h("p", { class: "sub" }, "Numbers are assigned only by the registration process. They cannot be reassigned by hand. Reset the round to free them."));
+  },
+
+  round(){
+    const r = D.round, open = regState() === "Open";
+    return h("div", null, h("h2", "Round Management"),
+      h("div", { class: "stats" }, stat("Round", "#" + r.id), stat("Status", r.status), stat("Started", fmt(r.created_at)), stat("Completed", fmt(r.completed_at))),
+      h("p", null,
+        h("button", { class: "btn pri", disabled: r.status === "full", onclick: () => setReg(!open) }, open ? "Close registration" : "Open registration"),
+        h("button", { class: "btn gold", disabled: !["full", "closed"].includes(r.status), onclick: newRound }, "Start new round"),
+        h("button", { class: "btn bad", onclick: resetRound }, "Reset Current Round")),
+      h("p", { class: "sub" }, "Reset keeps the old round in Previous Rounds, opens a fresh round and frees numbers 1 to 4. A new round can be started once this one is full or closed."));
+  },
+
+  settings(){
+    const name = h("input", { maxlength: 80 }); name.value = D.settings.platform_name;
+    const rc = h("input", { type: "checkbox" }); rc.checked = D.settings.require_code;
+    const rr = h("input", { type: "checkbox" }); rr.checked = D.settings.reset_reopens;
+    const lbl = h("input", { placeholder: "Member label, e.g. Member A", maxlength: 60 });
+    const days = h("input", { type: "number", min: 1, max: 365, placeholder: "Expires in days (optional)" });
+    const inv = D.invitations;
+    const box = newInvite ? h("div", { class: "card" }, h("b", "New code for " + newInvite.label),
+      h("p", { class: "sub" }, "Shown only once. Send it privately to this member."),
+      h("div", { class: "invite" }, "Link: " + root + "?c=" + newInvite.code), h("div", { class: "invite" }, "Code: " + newInvite.code),
+      h("button", { class: "btn gold", onclick: () => copy(root + "?c=" + newInvite.code, "Invitation link copied.") }, "Copy link"),
+      h("a", { class: "btn", target: "_blank", rel: "noopener", style: "text-decoration:none;display:inline-block",
+        href: "https://wa.me/?text=" + encodeURIComponent("Hi " + newInvite.label + ", get your Merry-Go-Round number here: " + root + "?c=" + newInvite.code) }, "Send on WhatsApp")) : null;
+    return h("div", null, h("h2", "Registration Settings"),
+      h("div", { class: "card" },
+        h("label", "Platform name"), name,
+        h("label", { class: "chk" }, rc, "Members must use an invitation code (recommended)"),
+        h("label", { class: "chk" }, rr, "Reopen registration automatically after a reset"),
+        h("p", { class: "sub" }, "Allowed members per round: 4 (fixed). Numbers: 1, 2, 3, 4."),
+        h("button", { class: "btn pri", onclick: async () => {
+          const r = await call("admin_save_settings", { p_name: name.value, p_require_code: rc.checked, p_reset_reopens: rr.checked });
+          if(r && r.ok) toast("Settings saved."); else if(r) toast("Name must be 2 to 80 characters.", true); load(true); } }, "Save settings")),
+      h("h2", "Invitation codes (" + inv.length + " of 4)"), box,
+      h("div", { class: "tw" }, h("table", null, h("thead", null, h("tr", null, ...["Member", "This round", "Expires", ""].map(x => h("th", x)))),
+        h("tbody", null, inv.length ? inv.map(i => h("tr", null, h("td", i.label),
+          h("td", h("span", { class: "tag" + (i.used ? "" : " w") }, i.used ? "Used" : "Not used")), h("td", i.expires_at ? fmt(i.expires_at) : "Never"),
+          h("td", h("button", { class: "btn sm", onclick: () => regen(i) }, "New code"), h("button", { class: "btn sm bad", onclick: () => delInv(i) }, "Delete"))))
+          : h("tr", null, h("td", { colspan: 4 }, "No invitations yet."))))),
+      h("div", { class: "card", style: "margin-top:14px" }, h("b", "Add an invitation"), lbl, days,
+        h("button", { class: "btn gold", disabled: inv.length >= 4, onclick: async () => {
+          const r = await call("admin_add_invitation", { p_label: lbl.value, p_days: days.value ? parseInt(days.value, 10) : null });
+          if(r && r.ok){ newInvite = { label: lbl.value.trim(), code: r.code }; } else if(r) toast(r.error === "limit" ? "All 4 invitations already exist." : "Enter a label.", true);
+          load(true); } }, "Create invitation")));
+  },
+
+  history(){
+    return h("div", null, h("h2", "Previous Rounds"),
+      D.history.length ? h("div", { class: "tw" }, h("table", null,
+        h("thead", null, h("tr", null, ...["Round", "Started", "Ended", "Registrations", "Status", "Final assignments"].map(x => h("th", x)))),
+        h("tbody", null, D.history.map(r => h("tr", null, h("td", "#" + r.id), h("td", fmt(r.created_at)), h("td", fmt(r.ended_at || r.completed_at)),
+          h("td", r.results.length), h("td", h("span", { class: "tag g" }, r.status)),
+          h("td", r.results.length ? r.results.map(x => x.number + " = " + x.name).join(", ") : "—")))))) : h("p", { class: "sub" }, "No previous rounds yet."));
+  },
+
+  audit(){
+    return h("div", null, h("h2", "Audit Logs"), h("div", { class: "tw" }, h("table", null,
+      h("thead", null, h("tr", null, ...["Time", "Event", "Administrator", "Round", "Details"].map(x => h("th", x)))),
+      h("tbody", null, D.audit.map(a => h("tr", null, h("td", fmt(a.at)), h("td", a.event), h("td", a.admin_email || "system"), h("td", a.round_id ?? "—"), h("td", a.detail || "")))))));
+  },
+
+  account(){
+    const pw = h("input", { type: "password", placeholder: "New password (8+ characters)", autocomplete: "new-password" });
+    return h("div", null, h("h2", "Admin Settings"),
+      h("div", { class: "card" }, h("p", null, "Signed in as ", h("b", D.admin_email)),
+        h("p", { class: "sub" }, "This platform has exactly one administrator. No other account can be given admin access."),
+        h("label", "Change password"), pw,
+        h("button", { class: "btn pri", onclick: async () => {
+          if(pw.value.length < 8){ toast("Use at least 8 characters.", true); return; }
+          const { error } = await sb.auth.updateUser({ password: pw.value });
+          if(error){ toast(error.message, true); return; }
+          await sb.rpc("admin_log", { p_event: "password_changed" }); pw.value = ""; toast("Password changed."); } }, "Change password"),
+        h("button", { class: "btn", onclick: logout }, "Logout")));
+  }
+};
+
+/* ---------- actions ---------- */
+async function setReg(open){
+  const r = await call("admin_set_registration", { p_open: open });
+  if(r && r.ok) toast(open ? "Registration opened." : "Registration closed."); load(true);
+}
+async function newRound(){
+  if(!confirm("Start a new round? The current round is saved to Previous Rounds.")) return;
+  const r = await call("admin_new_round", { p_kind: "new" });
+  if(r && r.ok) toast("New round started."); else if(r) toast("The current round is still active.", true); load(true);
+}
+async function resetRound(){
+  if(!confirm("Are you sure you want to reset this round? This action will clear all current member registrations and number assignments for the active round and make numbers 1–4 available again.")) return;
+  if(!await reauth("Enter your admin password to confirm the reset.")) return;
+  const r = await call("admin_new_round", { p_kind: "reset" });
+  if(r && r.ok) toast("Round reset. A new round is ready."); load(true);
+}
+async function regen(i){
+  if(!confirm("Create a new code for " + i.label + "? The old code stops working.")) return;
+  const r = await call("admin_regen_invitation", { p_id: i.id });
+  if(r && r.ok) newInvite = { label: i.label, code: r.code }; load(true);
+}
+async function delInv(i){
+  if(!confirm("Delete the invitation for " + i.label + "?")) return;
+  await call("admin_delete_invitation", { p_id: i.id }); load(true);
+}
+function csv(){
+  const q = v => '"' + String(v ?? "").replace(/"/g, '""') + '"';
+  const lines = ["Registration ID,Member,Assigned number,Registered at,Status,Round"].concat(
+    D.members.map(m => [m.id, q(m.name), m.number, q(m.at), m.status, m.round_id].join(",")));
+  const a = h("a"); a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+  a.download = "round-" + D.round.id + "-results.csv"; a.click();
+}
+
+enter();
+</script>
+</body>
+</html>

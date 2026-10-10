@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Merry-Go-Round Number Selector</title>
+<link rel="stylesheet" href="/style.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="/config.js"></script>
+</head>
+<body>
+<div class="hero">
+  <div class="crest" aria-hidden="true">★</div>
+  <h1 id="title">Merry-Go-Round Number Selector</h1>
+  <p>Welcome! Enter your name to receive one randomly assigned number. Each number can only be assigned once per round.</p>
+</div>
+
+<main class="wrap">
+  <!-- HOME -->
+  <section id="home" class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <span class="pill" id="status"><i></i><span id="statusText">Loading…</span></span>
+      <span class="sub" id="remain"></span>
+    </div>
+    <div class="nums" id="nums" aria-live="polite"></div>
+
+    <div id="mineBox" class="note hide">
+      You already have a number for this round.
+      <button class="btn sm pri" id="viewMine">View my number</button>
+    </div>
+
+    <div id="closedMsg" class="note hide"></div>
+
+    <form id="form" autocomplete="off">
+      <label for="name">Your full name</label>
+      <input id="name" maxlength="60" autocomplete="name" placeholder="e.g. Jane Wanjiru">
+      <div id="codeRow">
+        <label for="code">Invitation code</label>
+        <input id="code" maxlength="20" autocapitalize="characters" placeholder="Code from the administrator">
+      </div>
+      <button class="cta" id="go" type="submit">Get My Number</button>
+      <p class="err" id="err" role="alert"></p>
+    </form>
+    <p class="sub">Numbers are assigned randomly by the server. You cannot choose one.</p>
+  </section>
+
+  <!-- CONFIRMATION -->
+  <section id="confirm" class="card center hide">
+    <div class="good">REGISTRATION SUCCESSFUL!</div>
+    <h2 id="cName" style="margin-top:.4em"></h2>
+    <p class="sub">Your randomly assigned number is:</p>
+    <div class="big" id="cNum"></div>
+    <p>Your number has been successfully reserved for this round.</p>
+    <button class="btn pri" id="backHome">Return to Home</button>
+  </section>
+
+  <p class="foot"><a href="/admin/login">Administrator login</a></p>
+</main>
+
+<script>
+const sb = supabase.createClient(CONFIG.url, CONFIG.key);
+const $ = id => document.getElementById(id);
+const KEY = "mgr2";
+let st = null, mine = null, mineRound = null, saved = JSON.parse(localStorage.getItem(KEY) || "{}");
+if(!saved.token){ saved.token = crypto.randomUUID(); localStorage.setItem(KEY, JSON.stringify(saved)); }
+const urlCode = new URLSearchParams(location.search).get("c");
+if(urlCode) $("code").value = urlCode;
+
+const ERR = {
+  bad_name: "Please enter your real name, using letters only (2 to 60 characters).",
+  invalid_code: "That invitation code is not valid. Check it and try again.",
+  stale_round: "The round was just reset. The page has been refreshed. Please try again.",
+  closed: "Registration is currently closed.",
+  full: "All numbers have been taken. Registration is now closed for this round."
+};
+
+async function refresh(){
+  const { data, error } = await sb.from("public_status").select("*").eq("id", 1).maybeSingle();
+  if(error || !data){ $("statusText").textContent = "Cannot reach the server"; $("status").classList.add("off"); return; }
+  st = data;
+  if(mineRound !== st.round_id){ mine = null; mineRound = st.round_id; }
+  render();
+  if(!mine && (saved.code || !st.require_code)) await checkMine();
+}
+
+async function checkMine(){
+  const { data } = await sb.rpc("my_assignment", { p_code: saved.code || "", p_token: saved.token });
+  if(data && data.ok && data.number){ mine = { name: data.name, number: data.number }; render(); }
+}
+
+function render(){
+  $("title").textContent = st.platform_name || "Merry-Go-Round Number Selector"; document.title = $("title").textContent;
+  const taken = st.taken || [], full = taken.length >= 4, open = st.registration_open && !full;
+  $("status").classList.toggle("off", !open);
+  $("statusText").textContent = full ? "Registration closed (all numbers taken)" : open ? "Registration open" : "Registration closed";
+  $("remain").textContent = (4 - taken.length) + " of 4 numbers available";
+  const box = $("nums"); box.innerHTML = "";
+  for(let n = 1; n <= 4; n++){
+    const t = taken.includes(n), d = document.createElement("div");
+    d.className = "num-card" + (t ? " taken" : "");
+    const b = document.createElement("b"); b.textContent = n;
+    const s = document.createElement("span"); s.textContent = t ? "Taken" : "Available";
+    d.append(b, s); box.appendChild(d);
+  }
+  $("codeRow").classList.toggle("hide", !st.require_code);
+  $("mineBox").classList.toggle("hide", !mine);
+  $("form").classList.toggle("hide", !!mine || !open);
+  const cm = $("closedMsg");
+  cm.classList.toggle("hide", !!mine || open);
+  cm.textContent = full ? ERR.full : "Registration is currently closed. Please check back later.";
+}
+
+function showConfirm(name, number){
+  $("cName").textContent = "Hello, " + name + ".";
+  $("cNum").textContent = number;
+  $("home").classList.add("hide"); $("confirm").classList.remove("hide");
+}
+$("backHome").onclick = () => { $("confirm").classList.add("hide"); $("home").classList.remove("hide"); refresh(); };
+$("viewMine").onclick = () => mine && showConfirm(mine.name, mine.number);
+
+$("form").onsubmit = async e => {
+  e.preventDefault();
+  const name = $("name").value.trim(), code = $("code").value.trim();
+  $("err").textContent = "";
+  if(!name){ $("err").textContent = "Please enter your full name."; return; }
+  if(st && st.require_code && !code){ $("err").textContent = "Please enter your invitation code."; return; }
+  $("go").disabled = true; $("go").textContent = "Getting your number…";
+  const { data, error } = await sb.rpc("register_member", { p_name: name, p_code: code, p_token: saved.token, p_round: st ? st.round_id : null });
+  $("go").disabled = false; $("go").textContent = "Get My Number";
+  if(error || !data){ $("err").textContent = "Something went wrong. No number was used. Please try again."; return; }
+  if(!data.ok){ $("err").textContent = ERR[data.error] || "Could not complete your registration."; refresh(); return; }
+  saved.code = st && st.require_code ? code : ""; saved.name = data.name;
+  localStorage.setItem(KEY, JSON.stringify(saved));
+  mine = { name: data.name, number: data.number };
+  showConfirm(data.name, data.number); refresh();
+};
+
+// live updates + safety nets (database is always the source of truth)
+sb.channel("public-status").on("postgres_changes", { event: "*", schema: "public", table: "public_status" }, refresh)
+  .subscribe(s => { if(s === "SUBSCRIBED") refresh(); });
+setInterval(refresh, 8000);
+document.addEventListener("visibilitychange", () => !document.hidden && refresh());
+window.addEventListener("online", refresh);
+refresh();
+</script>
+</body>
+</html>
